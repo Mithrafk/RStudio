@@ -1,0 +1,16 @@
+# Environnement R
+r-env/
+
+# Fichiers et dossiers RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# Fichiers temporaires
+*.tmp
+*.log

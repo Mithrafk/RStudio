@@ -1,0 +1,18 @@
+il manque 825 jours dans le DebitYvette (mais pas de na car les lignes sont juste absentes)
+On va prendre entre 1999 et 2022 => Pas de trou
+
+Pour le POT : Le seuil est à 60 (recopié des températures) mais pour les débit on a des valeurs bcp plus grande (les quantiles à 95 % et 98 % des résidus valent environ 2 900 et 5 000) ==> Modifier ca (ou bcp plus petit si on passe en m3/s)
+    De même pour le xrange = c(80,150) et c(80,200), on a des résidus qui vont jusqu'à 23.000, adapter ?
+
+On passe de l/s à m3/s (residus <- residus / 1000 # l/s -> m3/s), ca permet de réduire les échelles des données sans modifier l'information, et facilite les calculs et notamment la convergence des modèles
+
+
+La prof donne :
+ProbDep2 = (1/theta)*1/(200*P)  # definir la proba qui nous interesse
+ProbDep1 = (1/theta)*1/(100*P) 
+==> Prbl : ca ne converge pas (avec θ = 0,5, tp = 73, N = 100 et P = 365, on a prob = 5.5-10^-5)
+
+Mais dans le texte on a : 
+ProbDep1 = theta * tp / (100 * P)
+ProbDep2 = theta * tp / (200 * P)
+(ici on a prob = 0.001 qui permet de converger)
