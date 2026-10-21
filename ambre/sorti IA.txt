@@ -1,0 +1,26 @@
+Voici le fichier analyse_CE50_CE10_daphnies.Rmd (j’imagine que « .rm » voulait dire .Rmd). Il contient le code R et des explications en markdown. Je n’ai pas pu le knitter, car R n’est pas installé dans mon environnement. J’ai donc recalculé les ajustements logistiques en Python pour écrire les commentaires. Les valeurs sont indicatives, et le code R est à exécuter chez toi pour confirmer. Mets les 3 CSV dans le même dossier que le .Rmd, puis fais Knit.
+
+Ce que fait le fichier
+
+Données : les taux de survie sont tous des multiples de 20 %, j’en déduis 5 daphnies par réplicat. Je reconstruis le nombre de morts sur 5, et le code vérifie cette hypothèse. Si ton protocole est différent, change n_org en haut du code.
+Modèle M1 : un glm binomial avec lien logit, comme dans modèle_logistique.rmd. Je n’ai pas repris le nls de MNL.Rmd, qui suppose des erreurs gaussiennes alors qu’on a des comptages.
+Modèle M2 : un modèle log-logistique avec correction de la mortalité du témoin. Il est utile parce que les témoins de G1 et G4 ont 10 % de mortalité, ce qui fausse la CE10 de M1.
+Graphiques : un par jeu, avec les réplicats, la moyenne par concentration, les deux courbes, l’IC 95 % de M1 et les CE10/CE50 marquées. Un second axe donne le nombre de daphnies mortes sur 5.
+Hypothèses testées, avec plusieurs tests pour chacune :
+effet de la concentration : test du rapport de vraisemblance et test de Wald ;
+loi binomiale : chi² de Pearson, déviance, déviance par simulation Monte-Carlo ;
+forme du modèle : test de manque d’ajustement, terme quadratique, comparaison des liens logit/probit/cloglog par l’AIC ;
+valeurs aberrantes : résidus de Pearson standardisés et distance de Cook.
+
+L’indépendance des observations ne se teste pas statistiquement. Elle est contrôlée indirectement par la surdispersion. La normalité des résidus n’est pas une hypothèse d’un modèle binomial, donc je ne fais pas de ks.test ici.
+
+Résultats indicatifs
+
+Jeu	CE50	CE10	Remarque
+G1 dichromate	≈ 0,78 (M1), 0,86 (M2)	≈ 0,33 (M1), 0,65 (M2)	M1 est rejeté (manque d’ajustement, p ≈ 0,005), M2 est préférable
+G4 diclofénac	≈ 67 (M1), 70 (M2)	≈ 28 (M1), 48 (M2)	M1 est bon, l’écart sur la CE10 vient de la définition
+G6 diclofénac	≈ 75 (M1), 68 (M2)	≈ 28 (M1), 25 (M2)	légère surdispersion, due à un réplicat à 55,6 où les 5 daphnies sont mortes
+
+La CE10 est nettement moins stable que la CE50. Avec un témoin à 10 % de mortalité, M1 mesure 10 % de mortalité totale, alors que M2 mesure 10 % en plus du témoin. Pour la CE10 de G1 et G4, je te conseille donc M2.
+
+Dans le fichier, une section « Lecture » commente chaque jeu après son code. Vérifie qu’elle correspond bien à ta sortie R.
