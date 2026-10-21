@@ -1,0 +1,234 @@
+---
+title: "CE50 et CE10 sur daphnies : régression logistique"
+output: html_document
+---
+
+ ```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7.5, fig.height = 4.8)
+```
+
+# Principe
+
+Chaque réplicat contient 5 daphnies (les taux de survie sont des multiples de 20 %). On compte donc le **nombre de daphnies mortes sur 5**. Ce nombre suit une loi binomiale, donc on utilise un modèle logistique (`glm` avec `family = binomial`), comme dans `modèle_logistique.rmd` :
+
+$$\text{logit}(p) = \beta_0 + \beta_1 \times \text{concentration}$$
+
+où $p$ est la probabilité qu'une daphnie meure. La concentration pour laquelle $p$ vaut 50 % ou 10 % se déduit des coefficients :
+
+$$CE50 = \frac{-\beta_0}{\beta_1} \qquad CE10 = \frac{\text{logit}(0.1) - \beta_0}{\beta_1}$$
+
+**Hypothèses du modèle et test utilisé pour chacune :**
+
+| Hypothèse | Test |
+|---|---|
+| La concentration a un effet | Test de $\beta_1$ (`summary`) et `anova` |
+| Les morts suivent une loi binomiale (pas de surdispersion) | Chi² de Pearson : X²/ddl doit être proche de 1 |
+| Le logit est bien une droite de la concentration | Comparaison avec le modèle où chaque concentration a son propre taux (`anova`) |
+| Pas de point aberrant | Graphique des résidus |
+
+L'indépendance des daphnies ne se teste pas : elle dépend de la façon dont l'expérience a été faite.
+
+```{r}
+library(MASS)   # pour dose.p (calcul des CE avec leur écart-type)
+n <- 5          # nombre de daphnies par réplicat
+```
+
+# Code d'affichage du graphique (uniquement mise en forme)
+
+Cette partie ne sert **qu'à dessiner** le graphique. Elle n'est pas nécessaire à l'analyse : on la définit une fois, puis on l'appelle en une ligne pour chaque jeu (`graphique_modele(fit, dat, "titre")`).
+
+**Lecture du graphique :** petits points gris = les réplicats ; ronds blancs = moyenne par concentration ; courbe rouge = modèle logistique ; zone bleue = intervalle de confiance à 95 % de la courbe ; traits pointillés = CE10 et CE50.
+
+```{r}
+library(ggplot2)
+
+graphique_modele <- function(fit, dat, titre) {
+
+  # --- CE10 et CE50, uniquement pour les marquer sur le graphique
+  b <- coef(fit)
+  ce <- data.frame(p = c(0.1, 0.5))
+  ce$x <- (qlogis(ce$p) - b[1]) / b[2]
+  ce$etiquette <- sprintf("CE%d = %.3g", round(100 * ce$p), ce$x)
+
+  # --- Moyenne des réplicats pour chaque concentration
+  moy <- aggregate(morts ~ conc, data = dat, FUN = mean)
+  moy$prop <- moy$morts / n
+
+  # --- Courbe du modèle et intervalle de confiance à 95 %
+  grille <- data.frame(conc = seq(0, max(dat$conc), length.out = 200))
+  pr <- predict(fit, newdata = grille, type = "link", se.fit = TRUE)
+  grille$pred <- plogis(pr$fit)
+  grille$bas  <- plogis(pr$fit - 1.96 * pr$se.fit)
+  grille$haut <- plogis(pr$fit + 1.96 * pr$se.fit)
+
+  # --- Dessin
+  ggplot() +
+    geom_ribbon(data = grille, aes(conc, ymin = bas, ymax = haut, fill = "IC à 95 %"),
+                alpha = 0.3) +
+    geom_line(data = grille, aes(conc, pred, colour = "Modèle logistique"), linewidth = 1) +
+    geom_jitter(data = dat, aes(conc, morts / n, colour = "Réplicats"), alpha = 0.4,
+                position = position_jitter(width = 0.012 * max(dat$conc), height = 0)) +
+    geom_point(data = moy, aes(conc, prop, colour = "Moyenne par concentration"),
+               shape = 21, fill = "white", size = 3, stroke = 1) +
+    geom_hline(yintercept = ce$p, linetype = "dotted", colour = "grey40") +
+    geom_segment(data = ce, aes(x = x, xend = x, y = 0, yend = p), linetype = "dashed") +
+    geom_text(data = ce, aes(x = x, y = p, label = etiquette),
+              hjust = 1.1, vjust = -0.6, size = 3.5) +
+    scale_colour_manual(
+      name = NULL,
+      values = c("Modèle logistique" = "red", "Réplicats" = "grey50",
+                 "Moyenne par concentration" = "black"),
+      breaks = c("Modèle logistique", "Réplicats", "Moyenne par concentration")) +
+    scale_fill_manual(name = NULL, values = c("IC à 95 %" = "steelblue")) +
+    guides(colour = guide_legend(override.aes = list(
+      linetype = c(1, 0, 0), shape = c(NA, 16, 21), fill = c(NA, NA, "white")))) +
+    scale_y_continuous(
+      labels = function(v) paste0(100 * v, " %"),
+      sec.axis = sec_axis(~ . * n, name = "Nombre de daphnies mortes (sur 5)")) +
+    labs(title = titre, x = "Concentration", y = "Mortalité") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+```
+
+# Jeu G1 : dichromate
+
+## Données
+
+```{r}
+d <- read.table("tableau_taux_survie_dichromateP_G1.csv", sep = ";", header = TRUE,
+                fileEncoding = "UTF-8-BOM")
+# Passage du taux de survie (%) au nombre de daphnies mortes
+morts <- round(n * (1 - d[, 3:ncol(d)] / 100))
+dat <- data.frame(conc  = rep(d$concentration, ncol(morts)),
+                  morts = as.vector(as.matrix(morts)))
+dat$vivantes <- n - dat$morts
+head(dat)
+```
+
+## Modèle
+
+```{r}
+fit <- glm(cbind(morts, vivantes) ~ conc, family = binomial, data = dat)
+summary(fit)
+```
+
+## CE50 et CE10
+
+```{r}
+dose.p(fit, p = c(0.5, 0.1))   # Dose = CE, SE = écart-type
+```
+
+## Graphique
+
+```{r}
+graphique_modele(fit, dat, "G1 - dichromate")
+```
+
+## Tests des hypothèses
+
+```{r}
+# 1. Effet de la concentration
+anova(fit, test = "Chisq")
+
+# 2. Loi binomiale : X²/ddl proche de 1 ? (sinon surdispersion)
+X2 <- sum(residuals(fit, type = "pearson")^2)
+X2 / fit$df.residual
+pchisq(X2, fit$df.residual, lower.tail = FALSE)
+
+# 3. Le logit est-il une droite ? Comparaison avec le modèle "une proportion par concentration"
+fit_facteur <- glm(cbind(morts, vivantes) ~ factor(conc), family = binomial, data = dat)
+anova(fit, fit_facteur, test = "Chisq")
+
+# 4. Points aberrants
+plot(fit, which = 1)
+```
+
+# Jeu G4 : diclofénac
+
+```{r}
+d <- read.table("tableau_taux_survie_diclo_G4.csv", sep = ";", header = TRUE,
+                fileEncoding = "UTF-8-BOM")
+morts <- round(n * (1 - d[, 3:ncol(d)] / 100))
+dat <- data.frame(conc  = rep(d$concentration, ncol(morts)),
+                  morts = as.vector(as.matrix(morts)))
+dat$vivantes <- n - dat$morts
+
+fit <- glm(cbind(morts, vivantes) ~ conc, family = binomial, data = dat)
+summary(fit)
+
+dose.p(fit, p = c(0.5, 0.1))
+```
+
+## Graphique
+
+```{r}
+graphique_modele(fit, dat, "G4 - diclofénac")
+```
+
+## Tests des hypothèses
+
+```{r}
+anova(fit, test = "Chisq")
+
+X2 <- sum(residuals(fit, type = "pearson")^2)
+X2 / fit$df.residual
+pchisq(X2, fit$df.residual, lower.tail = FALSE)
+
+fit_facteur <- glm(cbind(morts, vivantes) ~ factor(conc), family = binomial, data = dat)
+anova(fit, fit_facteur, test = "Chisq")
+
+plot(fit, which = 1)
+```
+
+# Jeu G6 : diclofénac
+
+```{r}
+d <- read.table("tableau_taux_survie_diclo_G6.csv", sep = ";", header = TRUE,
+                fileEncoding = "UTF-8-BOM")
+morts <- round(n * (1 - d[, 3:ncol(d)] / 100))
+dat <- data.frame(conc  = rep(d$concentration, ncol(morts)),
+                  morts = as.vector(as.matrix(morts)))
+dat$vivantes <- n - dat$morts
+
+fit <- glm(cbind(morts, vivantes) ~ conc, family = binomial, data = dat)
+summary(fit)
+
+dose.p(fit, p = c(0.5, 0.1))
+```
+
+## Graphique
+
+```{r}
+graphique_modele(fit, dat, "G6 - diclofénac")
+```
+
+## Tests des hypothèses
+
+```{r}
+anova(fit, test = "Chisq")
+
+X2 <- sum(residuals(fit, type = "pearson")^2)
+X2 / fit$df.residual
+pchisq(X2, fit$df.residual, lower.tail = FALSE)
+
+fit_facteur <- glm(cbind(morts, vivantes) ~ factor(conc), family = binomial, data = dat)
+anova(fit, fit_facteur, test = "Chisq")
+
+plot(fit, which = 1)
+```
+
+# Résultats et interprétation
+
+Valeurs indicatives, à comparer avec votre sortie R (unité = celle de la colonne `concentration`) :
+
+| Jeu | CE50 | CE10 | Effet de la conc. | X²/ddl (p) | Test de la droite (p) |
+|---|---|---|---|---|---|
+| G1 dichromate | ≈ 0,78 | ≈ 0,33 | très significatif | 1,5 (0,04) | 0,005 |
+| G4 diclofénac | ≈ 67 | ≈ 28 | très significatif | 1,16 (0,26) | 0,46 |
+| G6 diclofénac | ≈ 75 | ≈ 28 | très significatif | 1,29 (0,12) | 0,11 |
+
+- **G4 et G6** : le modèle convient. Les p-values des tests 2 et 3 sont supérieures à 0,05, donc on ne rejette ni la loi binomiale ni la forme en droite du logit. G6 a une légère surdispersion, due à un réplicat à 55,6 où les 5 daphnies sont mortes (visible sur le graphique des résidus). Les CE de G4 et G6 sont cohérentes entre elles (CE50 autour de 70).
+- **G1** : la concentration a un effet net, mais le modèle s'ajuste moins bien : le test de la droite est rejeté (p ≈ 0,005) et il y a un peu de surdispersion. La courbe réelle est plus raide que la courbe logistique. La CE50 reste utilisable, la CE10 est à prendre avec prudence.
+- **CE10 en général** : elle est moins précise que la CE50 (écart-type plus grand), car elle se situe dans la queue de la courbe. De plus, les témoins de G1 et G4 ont 10 % de mortalité : la CE10 est donc proche de la mortalité naturelle.
