@@ -1,0 +1,287 @@
+---
+title: "CE50 et CE10 sur daphnies : régression logistique"
+subtitle: "Dichromate de potassium (G1) et diclofénac (G4, G6)"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7.5, fig.height = 4.8)
+```
+
+# Objectif et démarche
+
+On cherche, pour chaque jeu de données, la concentration qui tue 50 % (**CE50**) et 10 % (**CE10**) des daphnies, à partir d'une courbe dose-réponse ajustée par régression logistique.
+
+**Les données.** Chaque ligne du CSV est une concentration, chaque colonne `replicat k` un réplicat, et la valeur est un *taux de survie en %*. Tous les taux sont des multiples de 20 %, donc chaque réplicat contient **5 daphnies** (hypothèse vérifiée dans le code). On reconstruit donc, pour chaque réplicat, le nombre de daphnies mortes sur 5.
+
+**Pourquoi une régression logistique (et pas `nls` comme dans `MNL.Rmd`).** La variable étudiée est un *nombre de morts sur 5*, donc une loi binomiale, pas une variable gaussienne. On utilise donc, comme dans `modèle_logistique.rmd`, un `glm` binomial avec lien logit, plutôt que `nls` qui suppose des erreurs gaussiennes de variance constante.
+
+**Deux modèles comparés :**
+
+| Modèle | Formule de la probabilité de mort | Définition de la CEx |
+|---|---|---|
+| **M1** (modèle du TD) | $p = \mathrm{logit}^{-1}(\beta_0+\beta_1\,\text{conc})$ | concentration où la mortalité *totale* vaut x % |
+| **M2** (pratique en écotoxicologie) | $p = c + (1-c)\,\mathrm{logit}^{-1}(\beta_0+\beta_1\ln \text{conc})$, avec $c$ = mortalité du témoin | concentration provoquant x % de mortalité *en plus* du témoin (correction d'Abbott) |
+
+M2 est ajouté parce que les témoins de G1 et G4 ont ~10 % de mortalité : sans correction, la CE10 de M1 est presque confondue avec la mortalité naturelle. M2 utilise aussi le logarithme de la concentration, qui est l'échelle habituelle des courbes dose-réponse (le témoin à 0 est traité à part : $p=c$).
+
+**Hypothèses vérifiées pour M1** (plusieurs tests proposés pour chacune) :
+
+| # | Hypothèse | Tests utilisés |
+|---|---|---|
+| H0 | La concentration a un effet | Test du rapport de vraisemblance (LRT) contre le modèle nul + test de Wald |
+| H1 | Indépendance des observations | Non testable statistiquement : relève du plan d'expérience (voir remarque) |
+| H2 | Loi binomiale (pas de surdispersion) | Chi² de Pearson, déviance, déviance par simulation Monte-Carlo |
+| H3 | Le logit est bien linéaire en la concentration | LRT contre le modèle saturé (concentration en facteur), LRT du terme quadratique, comparaison AIC des liens logit/probit/cloglog |
+| H4 | Pas d'observation aberrante ou trop influente | Résidus de Pearson standardisés, distance de Cook |
+
+*Remarque sur H1 :* les 4 à 6 daphnies d'un même réplicat vivent dans le même bécher. Si les réplicats se comportent de façon plus variable que ne le prévoit la loi binomiale, cela apparaît comme de la **surdispersion** (H2) : c'est le test qui contrôle indirectement l'indépendance.
+
+*Remarque sur la normalité :* pour un GLM binomial, la normalité des résidus n'est **pas** une hypothèse (contrairement au `ks.test` appliqué aux résidus du `nls` dans `MNL.Rmd`). On vérifie à la place la loi binomiale (H2).
+
+# Code
+
+## Fonctions
+
+```{r fonctions}
+library(ggplot2)
+
+n_org <- 5   # nombre de daphnies par réplicat (déduit des taux multiples de 20 %)
+
+# ---- Lecture et mise en forme : une ligne = un réplicat à une concentration
+lire_jeu <- function(fichier) {
+  d <- read.table(fichier, sep = ";", header = TRUE, dec = ".",
+                  fileEncoding = "UTF-8-BOM", check.names = FALSE)
+  cols <- grep("^replicat", names(d), value = TRUE)
+  long <- do.call(rbind, lapply(seq_along(cols), function(j)
+    data.frame(conc = d$concentration, replicat = j, survie = d[[cols[j]]])))
+  morts <- n_org * (1 - long$survie / 100)
+  stopifnot("Taux de survie incompatibles avec n_org" = all(abs(morts - round(morts)) < 1e-8))
+  long$dead  <- round(morts)
+  long$alive <- n_org - long$dead
+  long
+}
+
+# ---- CE_p pour un modèle logit en la concentration (méthode delta)
+# phi : facteur de correction de surdispersion appliqué à la variance
+ce_logit <- function(fit, p, phi = 1) {
+  b <- coef(fit); V <- vcov(fit) * phi
+  x <- (qlogis(p) - b[1]) / b[2]
+  g <- c(-1 / b[2], -x / b[2])              # gradient de x par rapport à (b0, b1)
+  se <- sqrt(drop(t(g) %*% V %*% g))
+  c(CE = unname(x), lo = unname(x - 1.96 * se), hi = unname(x + 1.96 * se))
+}
+
+# ---- Modèle M2 : log-logistique avec mortalité témoin c0 fixée (Abbott)
+pred_ll <- function(th, x, c0) {
+  Fx <- plogis(th[1] + th[2] * log(pmax(x, 1e-12)))
+  Fx[x == 0] <- 0                            # au témoin : p = c0
+  c0 + (1 - c0) * Fx
+}
+
+ce_ll <- function(th, V, p) {                # IC calculé sur ln(CE) puis ramené à l'échelle naturelle
+  lx <- (qlogis(p) - th[1]) / th[2]
+  g  <- c(-1 / th[2], -lx / th[2])
+  se <- sqrt(drop(t(g) %*% V %*% g))
+  c(CE = exp(lx), lo = exp(lx - 1.96 * se), hi = exp(lx + 1.96 * se))
+}
+
+# ---- Analyse complète d'un jeu de données
+analyse_jeu <- function(fichier, nom, B = 2000, seed = 123) {
+  d <- lire_jeu(fichier)
+  N <- nrow(d); nconc <- length(unique(d$conc))
+  c0 <- sum(d$dead[d$conc == 0]) / sum(n_org * (d$conc == 0))   # mortalité du témoin
+
+  cat("\n=====", nom, "=====\n")
+  cat("Mortalité observée du témoin :", round(100 * c0), "%\n")
+  cat("Morts par réplicat, par concentration :\n")
+  print(tapply(d$dead, d$conc, paste, collapse = " "))
+
+  # ---------------- M1 : GLM binomial, lien logit, concentration brute
+  fit <- glm(cbind(dead, alive) ~ conc, family = binomial, data = d)
+  cat("\n--- M1 : coefficients ---\n"); print(round(summary(fit)$coefficients, 4))
+
+  phi   <- sum(residuals(fit, "pearson")^2) / fit$df.residual   # dispersion de Pearson
+  phi_c <- max(1, phi)                                          # correction si surdispersion
+
+  # ---------------- Tests des hypothèses
+  tests <- data.frame(Hypothese = character(), Test = character(),
+                      Stat = numeric(), ddl = numeric(), p_value = numeric())
+  ajouter <- function(h, t, s, ddl, p)
+    tests <<- rbind(tests, data.frame(Hypothese = h, Test = t, Stat = s, ddl = ddl, p_value = p))
+
+  # H0 : effet de la concentration
+  lrt <- fit$null.deviance - fit$deviance
+  ajouter("H0 effet conc.", "LRT vs modèle nul", lrt, 1, pchisq(lrt, 1, lower.tail = FALSE))
+  zb <- summary(fit)$coefficients["conc", ]
+  ajouter("H0 effet conc.", "Wald (z)", zb["z value"], NA, zb["Pr(>|z|)"])
+
+  # H2 : loi binomiale / surdispersion
+  X2 <- sum(residuals(fit, "pearson")^2)
+  ajouter("H2 binomiale", "Chi² de Pearson", X2, fit$df.residual,
+          pchisq(X2, fit$df.residual, lower.tail = FALSE))
+  ajouter("H2 binomiale", "Déviance résiduelle", fit$deviance, fit$df.residual,
+          pchisq(fit$deviance, fit$df.residual, lower.tail = FALSE))
+  set.seed(seed)                              # Monte-Carlo : valable même avec de petits effectifs
+  mu <- fitted(fit)
+  dev_sim <- replicate(B, {
+    ys <- rbinom(N, n_org, mu)
+    suppressWarnings(glm(cbind(ys, n_org - ys) ~ conc, family = binomial, data = d)$deviance)
+  })
+  ajouter("H2 binomiale", "Déviance (Monte-Carlo)", fit$deviance, NA,
+          (1 + sum(dev_sim >= fit$deviance)) / (B + 1))
+
+  # H3 : forme du modèle (linéarité du logit)
+  fit_sat <- suppressWarnings(glm(cbind(dead, alive) ~ factor(conc), family = binomial, data = d))
+  lof <- fit$deviance - fit_sat$deviance; dlof <- fit$df.residual - fit_sat$df.residual
+  ajouter("H3 forme", "LRT vs modèle saturé (manque d'ajustement)", lof, dlof,
+          pchisq(lof, dlof, lower.tail = FALSE))
+  fit_q <- glm(cbind(dead, alive) ~ conc + I(conc^2), family = binomial, data = d)
+  lq <- fit$deviance - fit_q$deviance
+  ajouter("H3 forme", "LRT terme quadratique", lq, 1, pchisq(lq, 1, lower.tail = FALSE))
+
+  # H4 : valeurs aberrantes / influentes
+  rs <- rstandard(fit, type = "pearson"); cd <- cooks.distance(fit)
+  ajouter("H4 aberrants", "Nb de |résidu de Pearson std| > 2", sum(abs(rs) > 2), NA, NA)
+  ajouter("H4 aberrants", "Nb de Cook > 4/N", sum(cd > 4 / N), NA, NA)
+
+  cat("\n--- Tests des hypothèses de M1 ---\n")
+  print(transform(tests, Stat = round(Stat, 3), p_value = signif(p_value, 3)), row.names = FALSE)
+  cat("\nDispersion de Pearson (X²/ddl) =", round(phi, 2),
+      "-> IC de M1 corrigés par un facteur", round(phi_c, 2), "\n")
+
+  # H3 (suite) : comparaison des liens
+  fit_p <- glm(cbind(dead, alive) ~ conc, family = binomial("probit"), data = d)
+  fit_c <- tryCatch(glm(cbind(dead, alive) ~ conc, family = binomial("cloglog"), data = d),
+                    error = function(e) NULL)
+  cat("\nAIC par lien :\n")
+  print(round(c(logit = AIC(fit), probit = AIC(fit_p),
+                cloglog = if (is.null(fit_c)) NA else AIC(fit_c)), 2))
+
+  par(mfrow = c(1, 2)); plot(fit, which = c(1, 4)); par(mfrow = c(1, 1))
+
+  # ---------------- M2 : log-logistique + mortalité du témoin
+  nll <- function(th) {
+    p <- pmin(pmax(pred_ll(th, d$conc, c0), 1e-9), 1 - 1e-9)
+    -sum(dbinom(d$dead, n_org, p, log = TRUE))
+  }
+  th0 <- c(-3 * log(ce_logit(fit, .5)["CE"]), 3)
+  opt <- optim(th0, nll, method = "Nelder-Mead", control = list(maxit = 5000, reltol = 1e-12))
+  th  <- opt$par; V2 <- solve(optimHess(th, nll))
+  ll_sat <- sum(dbinom(d$dead, n_org, ave(d$dead / n_org, d$conc), log = TRUE))
+  lof2 <- 2 * (ll_sat + opt$value); df2 <- nconc - 3   # témoin = c0 consomme 1 ddl
+  cat("\n--- M2 : log-logistique + mortalité témoin (c0 =", round(c0, 2), ") ---\n")
+  cat("Paramètres (b0, b1) :", round(th, 3),
+      "| manque d'ajustement : déviance =", round(lof2, 2), ", ddl =", df2,
+      ", p =", signif(pchisq(lof2, df2, lower.tail = FALSE), 3), "\n")
+
+  # ---------------- Tableau des CE
+  ce <- rbind(
+    cbind(Modele = "M1 (IC binomial)",     Niveau = "CE10", t(ce_logit(fit, .1))),
+    cbind(Modele = "M1 (IC binomial)",     Niveau = "CE50", t(ce_logit(fit, .5))),
+    cbind(Modele = "M1 (IC corrigé surdisp.)", Niveau = "CE10", t(ce_logit(fit, .1, phi_c))),
+    cbind(Modele = "M1 (IC corrigé surdisp.)", Niveau = "CE50", t(ce_logit(fit, .5, phi_c))),
+    cbind(Modele = "M2 (Abbott, log-conc.)", Niveau = "CE10", t(ce_ll(th, V2, .1))),
+    cbind(Modele = "M2 (Abbott, log-conc.)", Niveau = "CE50", t(ce_ll(th, V2, .5)))
+  )
+  ce <- data.frame(Jeu = nom, ce, stringsAsFactors = FALSE)
+  ce[, c("CE", "lo", "hi")] <- lapply(ce[, c("CE", "lo", "hi")], function(v) signif(as.numeric(v), 3))
+  names(ce)[4:6] <- c("CE", "IC95_inf", "IC95_sup")
+  cat("\n--- CE10 et CE50 ---\n"); print(ce, row.names = FALSE)
+
+  # ---------------- Graphique
+  agg  <- aggregate(dead ~ conc, data = d, FUN = mean); agg$prop <- agg$dead / n_org
+  grid <- data.frame(conc = seq(0, max(d$conc), length.out = 300))
+  lp   <- predict(fit, grid, type = "link", se.fit = TRUE)
+  grid$M1 <- plogis(lp$fit)
+  grid$lo <- plogis(lp$fit - 1.96 * lp$se.fit * sqrt(phi_c))
+  grid$hi <- plogis(lp$fit + 1.96 * lp$se.fit * sqrt(phi_c))
+  grid$M2 <- pred_ll(th, grid$conc, c0)
+  ce1 <- data.frame(p = c(.1, .5), x = c(ce_logit(fit, .1)["CE"], ce_logit(fit, .5)["CE"]))
+  ce1$lab <- sprintf("CE%d = %.3g", round(100 * ce1$p), ce1$x)
+
+  g <- ggplot() +
+    geom_ribbon(data = grid, aes(conc, ymin = lo, ymax = hi), fill = "steelblue", alpha = .18) +
+    geom_line(data = grid, aes(conc, M1, colour = "M1 logit (IC95 % en bleu)"), linewidth = 1) +
+    geom_line(data = grid, aes(conc, M2, colour = "M2 log-logistique + témoin"),
+              linewidth = 1, linetype = "dashed") +
+    geom_jitter(data = d, aes(conc, dead / n_org), alpha = .35,
+                position = position_jitter(width = 0.012 * max(d$conc), height = 0)) +
+    geom_point(data = agg, aes(conc, prop), size = 3, shape = 21, fill = "white") +
+    geom_hline(yintercept = c(.1, .5), linetype = "dotted", colour = "grey40") +
+    geom_segment(data = ce1, aes(x = x, xend = x, y = 0, yend = p), linetype = "dotdash") +
+    geom_text(data = ce1, aes(x = x, y = p, label = lab), hjust = 1.1, vjust = -0.6, size = 3.3) +
+    scale_colour_manual(values = c("M1 logit (IC95 % en bleu)" = "firebrick",
+                                   "M2 log-logistique + témoin" = "darkgreen")) +
+    scale_y_continuous(labels = function(v) paste0(100 * v, " %"),
+                       sec.axis = sec_axis(~ . * n_org, name = paste0("Nombre de daphnies mortes (sur ", n_org, ")"))) +
+    labs(title = nom, x = "Concentration", y = "Mortalité", colour = NULL,
+         caption = "Petits points = réplicats ; ronds blancs = moyenne par concentration") +
+    theme_minimal() + theme(legend.position = "bottom")
+  print(g)
+
+  invisible(list(ce = ce, tests = tests, fit = fit, th = th))
+}
+```
+
+## Jeu G1 : dichromate de potassium
+
+```{r g1}
+r1 <- analyse_jeu("tableau_taux_survie_dichromateP_G1.csv", "G1 - dichromate")
+```
+
+**Lecture (valeurs indicatives, à confirmer avec votre sortie R).**
+
+- **Effet de la concentration** : très significatif (LRT, p < 10⁻¹⁵).
+- **M1 est limite** : le test de manque d'ajustement rejette le logit linéaire en la concentration (p ≈ 0,005) et le terme quadratique est significatif (p ≈ 0,05). La surdispersion est faible mais présente (X²/ddl ≈ 1,5). La courbe observée est très raide (25 % de survie à 0,87–1,04, puis 0 % dès 1,25) alors que le témoin à 10 % de mortalité tire l'ajustement linéaire vers le haut.
+- **M2 ajuste mieux** (p du manque d'ajustement ≈ 0,06 contre 0,005). **CE50 ≈ 0,78 (M1) à 0,86 (M2)** : estimation stable. **CE10 ≈ 0,33 (M1) contre ≈ 0,65 (M2)** : très instable, car la mortalité naturelle du témoin (10 %) est du même ordre que le seuil visé. On retient M2 pour la CE10.
+
+## Jeu G4 : diclofénac
+
+```{r g4}
+r4 <- analyse_jeu("tableau_taux_survie_diclo_G4.csv", "G4 - diclofénac")
+```
+
+**Lecture (valeurs indicatives).**
+
+- **M1 est cohérent avec les données** : déviance 26,7 pour 26 ddl (p ≈ 0,42), X²/ddl ≈ 1,16 (pas de surdispersion), manque d'ajustement p ≈ 0,46, terme quadratique non significatif (p ≈ 0,11). Les tests de H2 et H3 sont convergents.
+- **CE50 ≈ 67 (M1, IC ≈ 58–76) et ≈ 70 (M2)**.
+- **CE10 ≈ 28 (M1) contre ≈ 48 (M2)** : l'écart vient uniquement de la définition. M1 cherche 10 % de mortalité *totale* (donc quasi le niveau du témoin, qui est à 10 %), M2 cherche 10 % *en plus* du témoin. Pour une valeur de CE10 à comparer entre jeux, la définition d'Abbott (M2) est la plus défendable.
+
+## Jeu G6 : diclofénac (6 réplicats)
+
+```{r g6}
+r6 <- analyse_jeu("tableau_taux_survie_diclo_G6.csv", "G6 - diclofénac")
+```
+
+**Lecture (valeurs indicatives).**
+
+- Témoin à 0 % de mortalité : M1 et M2 ne diffèrent que par l'échelle (concentration brute ou logarithmique).
+- **M1 acceptable** : déviance p ≈ 0,10, Pearson p ≈ 0,12, manque d'ajustement p ≈ 0,11. Légère surdispersion (X²/ddl ≈ 1,3), due surtout au réplicat à 55,6 où 5 daphnies sur 5 sont mortes alors que les 5 autres réplicats en ont 0 à 2 : c'est probablement le point repéré par les résidus et la distance de Cook. Terme quadratique à la limite (p ≈ 0,05).
+- **CE50 ≈ 75 (M1, IC corrigé ≈ 62–88) et ≈ 68 (M2). CE10 ≈ 28 (M1) et ≈ 25 (M2).** Les deux modèles se recoupent, ce qui est rassurant. M2 ajuste un peu mieux (p ≈ 0,4).
+
+## Synthèse
+
+```{r synthese}
+synthese <- rbind(r1$ce, r4$ce, r6$ce)
+print(synthese, row.names = FALSE)
+```
+
+| Jeu | CE50 (M2, retenu) | CE10 (M2, retenu) | Qualité de M1 |
+|---|---|---|---|
+| G1 dichromate | ≈ 0,86 | ≈ 0,65 | manque d'ajustement : M2 préféré |
+| G4 diclofénac | ≈ 70 | ≈ 48 | bonne |
+| G6 diclofénac | ≈ 68 | ≈ 25 | correcte (légère surdispersion) |
+
+# Points de vigilance
+
+- **La CE10 est toujours moins précise que la CE50** : on est dans la queue de la courbe, là où il y a peu de données (IC nettement plus larges).
+- **Surdispersion** : quand X²/ddl > 1, utiliser les IC « corrigés surdispersion » (plus larges), seuls valables.
+- **Unités** : les CSV ne les précisent pas ; les CE sont dans l'unité de la colonne `concentration`.
+- **Hypothèse sur l'effectif** : le code suppose 5 daphnies par réplicat. Si ce n'est pas le cas dans votre protocole, modifier `n_org` en haut du code (la vérification `stopifnot` signalera une incohérence).
+- Les p-values Monte-Carlo varient légèrement selon la graine (fixée par `set.seed(123)`).

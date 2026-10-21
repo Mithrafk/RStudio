@@ -1,0 +1,124 @@
+---
+title: "Régression non linéaire paramétrique"
+subtitle: 'DA Métatox'
+author: "Sarah Ouadah"
+date: "2023-2024"
+output:
+  pdf_document:
+    includes:
+      in_header: mystyles.sty
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r packages, include=FALSE}
+#library(ggplot2)
+#library(kableExtra)
+#library(plyr)
+```
+
+\bigskip
+
+# Exemple : Croissance de P. subcapitata
+
+## Données
+
+On s'intéresse au taux de croissance de l'algue verte \emph{Pseudokirchneriella subcapitata} selon différentes concentrations (une concentration témoin et six concentrations testées en mg.L$^{-1}$) pendant une expérience de 72 heures. Pour cela, est mesurée la moyenne du nombre du nombre de cellules $\times 10^4$.mL$^{-1}$ toutes les 24 heures pour chaque solution. Les données recueillies sont les suivantes :
+
+```{r data}
+rm(list=ls())
+data=read.table("subcapitata.csv",sep=";",header=T)
+time=c(0,24,48,72)
+data
+```
+
+## Courbes de croissance (en fonction du temps)
+
+```{r croissance}
+plot(time,data[1,3:6],"l",col=1,lty=1,lwd=1,
+     xlab="Temps",ylab="Moyenne du nombre de cellules")
+lines(time,data[2,3:6],"l",col=2,lty=2,lwd=2)
+lines(time,data[3,3:6],"l",col=3,lty=3,lwd=3)
+lines(time,data[4,3:6],"l",col=4,lty=2,lwd=2)
+lines(time,data[5,3:6],"l",col=5,lty=1,lwd=1)
+lines(time,data[6,3:6],"l",col=6,lty=2,lwd=2)
+lines(time,data[7,3:6],"l",col=7,lty=3,lwd=3)
+legend(0,120,c("Temoin","C1","C2","C3","C4","C5","C6"),col=c(1,2,3,4,5,6,7),
+       lty=c(1,2,3,2,1,2,3),lwd=c(1,2,3,2,1,2,3))
+```
+
+## Question : Y a-t-il un effet de la "concentration" sur le taux de croissance de l'algue ?
+
+  - On calcule le taux de croissance moyen (sur la période de 72 heures) par concentration. On obtient une nouvelle colonne au tableau de données :
+  
+```{r databis}
+data$TxCroissance=(data$T72-data$T0)/72
+data
+```
+
+  - Représentation des taux de croissance moyens (en fonction de la concentration) :
+  
+```{r txcrois}
+plot(data$ConcNum,data$TxCroissance,"l",col=4,lwd=3,
+     xlab="Concentration",ylab="Taux de croissance moyen")
+```
+
+## Modèle de régression logistique
+
+### Initialisation des paramètres 
+$a_0 = 0.5$, $Q_0 = -1.8$, $c_0 = 1.8$ et $b_0 = 0.1125$
+  
+```{r init}
+a0=0.5
+Q0=-1.8
+c0=-Q0
+pente0=-4
+b0=Q0/(4*pente0)
+
+plot(data$ConcNum,data$TxCroissance,"l",col=4,lwd=3,
+     xlab="Concentration",ylab="Taux de croissance moyen")
+lines(seq(0,3,0.01),c0+Q0/(1+exp(-(seq(0,3,0.01)-a0)/b0)),"l",col=1,lty="dotted",lwd=3)
+```
+
+### Modèle de régression logistique avec la fonction \texttt{nls} 
+  
+```{r nls}
+TxCroissance.nls=nls(TxCroissance ~ c+Q/(1+exp(-(ConcNum-a)/b)),
+                     start = list(c=c0,Q=Q0,a=a0,b=b0), trace=T, data=data)
+```
+
+### Diagnostic des hypothèses du modèle
+
+```{r diag}
+library(nlstools)
+par(mfrow=c(2,2))
+plot(nlsResiduals(TxCroissance.nls))
+ks.test(nlsResiduals(TxCroissance.nls)$resi2[,2],"pnorm")
+```
+
+### Test du modèle 
+```{r nlsanova}
+TxCroissance.nls0=nls(TxCroissance ~ c,
+                     start = list(c=c0), trace=T, data=data)
+anova(TxCroissance.nls0,TxCroissance.nls)
+```
+
+### Estimation des paramètres 
+
+```{r plotfin}
+summary(TxCroissance.nls)
+c.Est=TxCroissance.nls$m$getPars()[1]
+Q.Est=TxCroissance.nls$m$getPars()[2]
+a.Est=TxCroissance.nls$m$getPars()[3]
+b.Est=TxCroissance.nls$m$getPars()[4]
+
+plot(data$ConcNum,data$TxCroissance,"l",col=4,lwd=3,
+     xlab="Concentration",ylab="Taux de croissance moyen")
+lines(seq(0,3,0.01),c.Est+Q.Est/(1+exp(-(seq(0,3,0.01)-a.Est)/b.Est)),
+      "l",col=2,lty="dotted",lwd=3)
+```
+
+
+

@@ -1,0 +1,59 @@
+---
+title: "Modèle non linéaire paramétrique"
+output: html_document
+date: "2025-09-30"
+---
+
+```{r}
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+# -------------------------------
+# 1. Simulation des données sous un modèle logistique
+# -------------------------------
+doses <- c(0, 0.5, 1.5, 2.5, 5, 10)
+n_per <- 10 # même nb d'échantillons pour chaque groupe
+# vrai paramètres du modèle
+beta0 <- -2 
+beta1 <- 0.8
+
+dat <- expand.grid(dose = doses, rep = 1:n_per) %>%
+  mutate(
+    eta = beta0 + beta1 * dose,
+    p = plogis(eta),
+    Y = rbinom(n(), 1, p)
+  ) %>%
+  mutate(dose_f = factor(dose, levels = doses))
+
+```
+
+```{r}
+# -------------------------------
+# 2. Ajustement linéaire et logistique
+# -------------------------------
+fit_lin <- lm(Y ~ dose, data = dat)
+fit_log <- glm(Y ~ dose, family = binomial, data = dat)
+
+# prédictions
+grid <- data.frame(dose = seq(min(doses), max(doses), length.out = 200))
+grid$pred_lin <- predict(fit_lin, newdata = grid)
+grid$pred_log <- predict(fit_log, newdata = grid, type = "response")
+
+
+fit_log
+
+# -------------------------------
+# 3. Visualisation
+# -------------------------------
+ggplot(dat, aes(x = dose, y = Y)) +
+  geom_jitter(height = 0.05, width = 0.1, alpha = 0.5) +
+  stat_summary(fun = mean, geom = "point", size = 3, color = "black") +
+  geom_line(data = grid, aes(x = dose, y = pred_lin), color = "blue", linetype = "dashed") +
+  geom_line(data = grid, aes(x = dose, y = pred_log), color = "red", size = 1) +
+  labs(title = "Réponse binaire simulée",
+       subtitle = "Rouge = modèle logistique (correct), Bleu = linéaire (mauvaise option)",
+       y = "Probabilité d'effet") +
+  theme_minimal()
+```
